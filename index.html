@@ -241,7 +241,28 @@ function useDerived(state){
       .sort((a,b)=>b.spent-a.spent);
     const leaks = catSpend.filter(x=>x.target>0 && x.spent>x.target);
 
-    return {catById, m, wStart, wEnd, quests, lifestyleCats,
+    // upcoming essential payments (bills going out) with weight vs income & outgoings
+    const today = new Date(), dToday = today.getDate();
+    const baseToday = new Date(today.getFullYear(), today.getMonth(), dToday);
+    const nextOccur = (dom) => {
+      const y=today.getFullYear(), mo=today.getMonth();
+      const dThis=Math.min(dom, new Date(y,mo+1,0).getDate());
+      let dt=new Date(y,mo,dThis);
+      if(dt < baseToday){ const dNext=Math.min(dom, new Date(y,mo+2,0).getDate()); dt=new Date(y,mo+1,dNext); }
+      return dt;
+    };
+    const outFlow = overview.essentials + overview.lifestyle;
+    const inFlow = overview.income;
+    const essRecur = recurring.filter(r=>catById[r.categoryId]?.type==="essential" && activeInMonth(r,m));
+    const upcomingList = essRecur.map(r=>{ const dt=nextOccur(r.dayOfMonth||1);
+      return { id:r.id, r, cat:catById[r.categoryId], date:dt, day:r.dayOfMonth||1,
+        days: Math.round((dt-baseToday)/86400000),
+        pctIn: inFlow? r.amount/inFlow:0, pctOut: outFlow? r.amount/outFlow:0 }; })
+      .sort((a,b)=>a.date-b.date);
+    const dueThisMonth = essRecur.filter(r=>(r.dayOfMonth||1)>=dToday && nextOccur(r.dayOfMonth||1).getMonth()===today.getMonth()).reduce((s,r)=>s+r.amount,0);
+    const upcoming = { list:upcomingList, dueThisMonth, inFlow, outFlow };
+
+    return {catById, m, wStart, wEnd, quests, lifestyleCats, upcoming,
       overview:{income,essentials,lifestyle,surplus,lifestyleRatio},
       streak, trend, catSpend, leaks,
       weekTotal: lifestyleCats.reduce((s,c)=>s+(spentWeekByCat[c.id]||0),0),
@@ -350,12 +371,38 @@ function Ring({pct,over}){
   </svg>;
 }
 
+function UpcomingCard({d}){
+  const u=d.upcoming; if(!u.list.length) return null;
+  const ord=(n)=>{const s=["th","st","nd","rd"],v=n%100;return n+(s[(v-20)%10]||s[v]||s[0]);};
+  const when=(x)=> x.days<0?"passed": x.days===0?"today": x.days===1?"tomorrow":`in ${x.days} days`;
+  return <div style={{...card,padding:16,marginBottom:12}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+      <span style={sectionTitle2}>Coming out this month</span>
+      <span style={{fontFamily:"Inter,sans-serif",fontSize:13,fontWeight:600,color:T.ink}}>{fmt(u.dueThisMonth)} still due</span>
+    </div>
+    <div style={{marginTop:10}}>
+      {u.list.map(x=>(
+        <div key={x.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 0",borderTop:`1px solid ${T.bg}`}}>
+          <div style={{display:"flex",flexDirection:"column"}}>
+            <span style={{fontFamily:"Inter,sans-serif",fontSize:14,color:T.ink}}>{x.cat?.emoji} {x.r.name}</span>
+            <span style={{fontFamily:"Inter,sans-serif",fontSize:11.5,color:x.days<=7?T.brass:T.muted,marginTop:2}}>{ord(x.day)} · {when(x)}</span>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end"}}>
+            <span style={{fontFamily:"Inter,sans-serif",fontVariantNumeric:"tabular-nums",fontSize:14.5,fontWeight:600,color:T.ink}}>{fmt(x.r.amount)}</span>
+            <span style={{fontFamily:"Inter,sans-serif",fontSize:11,color:T.muted,marginTop:2}}>{Math.round(x.pctIn*100)}% inc · {Math.round(x.pctOut*100)}% out</span>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>;
+}
 function StudyTab({d}){
   const o=d.overview;
   const maxTrend=Math.max(...d.trend.map(t=>t.total),1);
   const maxCat=Math.max(...d.catSpend.map(c=>c.spent),1);
   return (
     <div>
+      <UpcomingCard d={d}/>
       {/* overview */}
       <div style={{...card,padding:"16px 16px 8px"}}>
         <div style={sectionTitle2}>The month at a glance</div>
