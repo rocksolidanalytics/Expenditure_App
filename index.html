@@ -251,8 +251,8 @@ function useDerived(state){
       if(dt < baseToday){ const dNext=Math.min(dom, new Date(y,mo+2,0).getDate()); dt=new Date(y,mo+1,dNext); }
       return dt;
     };
-    const outFlow = overview.essentials + overview.lifestyle;
-    const inFlow = overview.income;
+    const outFlow = essentials + lifestyle;
+    const inFlow = income;
     const essRecur = recurring.filter(r=>catById[r.categoryId]?.type==="essential" && activeInMonth(r,m));
     const upcomingList = essRecur.map(r=>{ const dt=nextOccur(r.dayOfMonth||1);
       return { id:r.id, r, cat:catById[r.categoryId], date:dt, day:r.dayOfMonth||1,
