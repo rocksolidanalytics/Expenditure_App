@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Money — lifestyle & overview</title>
+<meta name="description" content="Log lifestyle spending, see your whole money picture." />
+
+<link rel="manifest" href="./manifest.webmanifest" />
+<meta name="theme-color" content="#2C5D50" />
+<link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="Money" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;background:#E7E4DA}
+  input,select,button,textarea{font:inherit}
+  ::-webkit-scrollbar{height:6px;width:6px}
+  ::-webkit-scrollbar-thumb{background:#CFC9BB;border-radius:6px}
+  @media (prefers-reduced-motion: reduce){*{transition:none!important}}
+</style>
+
+<!-- all deps from cdnjs (works in-preview and on GitHub Pages) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dexie/4.0.10/dexie.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+</head>
+<body>
+<div id="root" style="min-height:100vh"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+/* ---------------- design tokens ---------------- */
+const T = {
+  bg:"#E7E4DA", card:"#FBFAF5", ink:"#20302B", muted:"#6E7A72", line:"#D8D3C6",
+  pine:"#2C5D50", pineDeep:"#1E4238", brass:"#A9772E", brassSoft:"#EFE2C6",
+  brick:"#A8492F", sage:"#9DB3A6", good:"#3F7A5F"
+};
+
+/* ---------------- money + date helpers ---------------- */
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID()
+  : "id-" + Date.now() + "-" + Math.random().toString(16).slice(2));
+const fmt = (cents) => {
+  const v = (cents||0)/100;
+  const whole = Math.abs(v % 1) < 0.005;
+  return "€" + v.toLocaleString("en-IE",{minimumFractionDigits:whole?0:2,maximumFractionDigits:whole?0:2});
+};
+const toCents = (s) => {
+  const n = parseFloat(String(s).replace(",", "."));
+  return isNaN(n) ? null : Math.round(n*100);
+};
+const pad = (n) => String(n).padStart(2,"0");
+const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+const todayISO = () => iso(new Date());
+const monthOf = (isoDate) => isoDate.slice(0,7);
+const thisMonth = () => todayISO().slice(0,7);
+const daysInMonth = (mKey) => { const [y,m]=mKey.split("-").map(Number); return new Date(y,m,0).getDate(); };
+const monthLabel = (mKey) => { const [y,m]=mKey.split("-").map(Number);
+  return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][m-1]+" "+y; };
+function weekBounds(ref){ // Monday-start week containing ref (Date) -> [startISO,endISO]
+  const d = new Date(ref); const day = (d.getDay()+6)%7; // 0=Mon
+  const start = new Date(d); start.setDate(d.getDate()-day);
+  const end = new Date(start); end.setDate(start.getDate()+6);
+  return [iso(start), iso(end)];
+}
+const activeInMonth = (r, mKey) => r.active && (!r.startMonth || r.startMonth<=mKey) && (!r.endMonth || mKey<=r.endMonth);
+
+/* ---------------- database ---------------- */
+const db = new Dexie("MoneyDB");
+db.version(1).stores({
+  categories: "id, type, archived",
+  transactions: "id, date, categoryId",
+  targets: "id, month, categoryId",
+  recurring: "id, active",
+  meta: "key"
+});
+
+const LIFESTYLE = [
+  ["groceries","Groceries","🛒","#3F7A5F",53700],
+  ["fuel","Fuel","⛽","#6B8F71",19600],
+  ["eatingout","Coffee & eating out","☕","#A9772E",13200],
+  ["shopping","Shopping / home","🛍️","#B07A54",11000],
+  ["other","Other","✨","#8A8570",9500],
+  ["health","Pharmacy / health","💊","#5E8A86",8500],
+  ["pubs","Pubs / drinks","🍺","#9C6B3F",4000],
+  ["pets","Pets","🐾","#7C8A5A",3600],
+];
+const ESSENTIAL = [
+  ["housing","Housing","🏠"],["childcare","Childcare","🧸"],["transport","Transport","🚗"],
+  ["utilities","Utilities","💡"],["insurance","Insurance","🛡️"],["subscriptions","Subscriptions","📺"],
+  ["fitness","Health & fitness","🏋️"],["fees","Fees","🏦"],
+];
+async function seedIfEmpty(){
+  const n = await db.categories.count();
+  if(n>0) return;
+  const cats=[];
+  LIFESTYLE.forEach(([id,name,emoji,color],i)=>cats.push({id,name,emoji,color,type:"lifestyle",archived:0,sortOrder:i}));
+  ESSENTIAL.forEach(([id,name,emoji],i)=>cats.push({id,name,emoji,color:"#6E7A72",type:"essential",archived:0,sortOrder:20+i}));
+  cats.push({id:"income",name:"Income",emoji:"💰",color:T.pine,type:"income",archived:0,sortOrder:99});
+  await db.categories.bulkAdd(cats);
+
+  const m = thisMonth();
+  await db.targets.bulkAdd(LIFESTYLE.map(([id,,,,tgt])=>({id:uuid(),categoryId:id,month:m,amount:tgt})));
+
+  await db.recurring.bulkAdd([
+    {id:uuid(),name:"Salary (PPB Treasury)",categoryId:"income",amount:314100,dayOfMonth:24,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Ellen — partner's share",categoryId:"income",amount:104000,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Misc (cash, refunds)",categoryId:"income",amount:2900,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Rent (Hogan)",categoryId:"housing",amount:139600,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Childcare (Little Harvard)",categoryId:"childcare",amount:68900,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Car loan (Credit Union)",categoryId:"transport",amount:31500,dayOfMonth:1,active:1,startMonth:null,endMonth:"2027-02"},
+    {id:uuid(),name:"Gym (Unit Fitness)",categoryId:"fitness",amount:13050,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Electricity (Yuno)",categoryId:"utilities",amount:7500,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Sky TV",categoryId:"subscriptions",amount:4500,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Insurance (Close Bros)",categoryId:"insurance",amount:4855,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Zurich Life",categoryId:"insurance",amount:4000,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Allianz",categoryId:"insurance",amount:2635,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"Three (mobile)",categoryId:"utilities",amount:2750,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+    {id:uuid(),name:"PTSB fee",categoryId:"fees",amount:800,dayOfMonth:1,active:1,startMonth:null,endMonth:null},
+  ]);
+  await db.meta.put({key:"app",schemaVersion:1,currency:"EUR",weekStartsOn:1,createdAt:Date.now(),lastExportAt:null});
+}
+
+/* ---------------- data hook ---------------- */
+function useLedger(){
+  const [state,setState] = useState(null);
+  const reload = useCallback(async ()=>{
+    const [categories,transactions,targets,recurring,meta] = await Promise.all([
+      db.categories.toArray(), db.transactions.toArray(),
+      db.targets.toArray(), db.recurring.toArray(), db.meta.get("app")
+    ]);
+    setState({categories,transactions,targets,recurring,meta});
+  },[]);
+  useEffect(()=>{ (async()=>{ await seedIfEmpty(); await reload(); })(); },[reload]);
+
+  const api = useMemo(()=>({
+    addTx: async(t)=>{ await db.transactions.add({...t,id:uuid(),createdAt:Date.now(),updatedAt:Date.now()}); reload(); },
+    updateTx: async(id,patch)=>{ await db.transactions.update(id,{...patch,updatedAt:Date.now()}); reload(); },
+    deleteTx: async(id)=>{ await db.transactions.delete(id); reload(); },
+    setTarget: async(categoryId,month,amount)=>{
+      const existing = await db.targets.where({categoryId}).and(x=>x.month===month).first();
+      if(existing) await db.targets.update(existing.id,{amount});
+      else await db.targets.add({id:uuid(),categoryId,month,amount});
+      reload();
+    },
+    saveRecurring: async(r)=>{ if(r.id) await db.recurring.put(r); else await db.recurring.add({...r,id:uuid()}); reload(); },
+    deleteRecurring: async(id)=>{ await db.recurring.delete(id); reload(); },
+    saveCategory: async(c)=>{ if(c.id && c._exists) await db.categories.put(c); else await db.categories.add({...c,id:c.id||uuid()}); reload(); },
+    exportJSON: async()=>{
+      const [categories,transactions,targets,recurring,meta]=await Promise.all([
+        db.categories.toArray(),db.transactions.toArray(),db.targets.toArray(),db.recurring.toArray(),db.meta.get("app")]);
+      await db.meta.update("app",{lastExportAt:Date.now()});
+      return {schemaVersion:1,exportedAt:new Date().toISOString(),meta,categories,transactions,targets,recurring};
+    },
+    importJSON: async(obj)=>{
+      if(!obj||obj.schemaVersion!==1) throw new Error("Not a valid backup (schemaVersion 1 expected).");
+      await db.transaction("rw",db.categories,db.transactions,db.targets,db.recurring,db.meta,async()=>{
+        await Promise.all([db.categories.clear(),db.transactions.clear(),db.targets.clear(),db.recurring.clear()]);
+        await db.categories.bulkAdd(obj.categories||[]);
+        await db.transactions.bulkAdd(obj.transactions||[]);
+        await db.targets.bulkAdd(obj.targets||[]);
+        await db.recurring.bulkAdd(obj.recurring||[]);
+        if(obj.meta) await db.meta.put({...obj.meta,key:"app"});
+      });
+      reload();
+    },
+    resetAll: async()=>{
+      await db.transaction("rw",db.categories,db.transactions,db.targets,db.recurring,db.meta,async()=>{
+        await Promise.all([db.categories.clear(),db.transactions.clear(),db.targets.clear(),db.recurring.clear(),db.meta.clear()]);
+      });
+      await seedIfEmpty(); reload();
+    },
+  }),[reload]);
+  return [state,api];
+}
+
+/* ---------------- selectors ---------------- */
+function useDerived(state){
+  return useMemo(()=>{
+    if(!state) return null;
+    const {categories,transactions,targets,recurring} = state;
+    const catById = Object.fromEntries(categories.map(c=>[c.id,c]));
+    const m = thisMonth();
+    const [wStart,wEnd] = weekBounds(new Date());
+
+    const lifestyleCats = categories.filter(c=>c.type==="lifestyle" && !c.archived);
+    const monthTx = transactions.filter(t=>monthOf(t.date)===m);
+    const weekTx = transactions.filter(t=>t.date>=wStart && t.date<=wEnd);
+
+    const spentMonthByCat = {}, spentWeekByCat = {};
+    monthTx.forEach(t=>{ spentMonthByCat[t.categoryId]=(spentMonthByCat[t.categoryId]||0)+t.amount; });
+    weekTx.forEach(t=>{ spentWeekByCat[t.categoryId]=(spentWeekByCat[t.categoryId]||0)+t.amount; });
+
+    const targetFor = (cid)=> (targets.find(x=>x.categoryId===cid && x.month===m)?.amount) || 0;
+    const dim = daysInMonth(m);
+
+    const quests = lifestyleCats.map(c=>{
+      const monthTarget = targetFor(c.id);
+      const weekPace = Math.round(monthTarget*7/dim);
+      const week = spentWeekByCat[c.id]||0;
+      const month = spentMonthByCat[c.id]||0;
+      return {cat:c, monthTarget, weekPace, week, month,
+        weekPct: weekPace? Math.min(week/weekPace,1.5):0,
+        over: weekPace>0 && week>weekPace};
+    });
+
+    // overview (income/essentials/lifestyle) for this month
+    const recIncome = recurring.filter(r=>catById[r.categoryId]?.type==="income" && activeInMonth(r,m)).reduce((s,r)=>s+r.amount,0);
+    const recEssential = recurring.filter(r=>catById[r.categoryId]?.type==="essential" && activeInMonth(r,m)).reduce((s,r)=>s+r.amount,0);
+    const txEssential = monthTx.filter(t=>catById[t.categoryId]?.type==="essential").reduce((s,t)=>s+t.amount,0);
+    const lifestyleSpend = monthTx.filter(t=>catById[t.categoryId]?.type==="lifestyle").reduce((s,t)=>s+t.amount,0);
+    const income = recIncome;
+    const essentials = recEssential + txEssential;
+    const lifestyle = lifestyleSpend;
+    const surplus = income - essentials - lifestyle;
+    const ratioBase = essentials + lifestyle;
+    const lifestyleRatio = ratioBase? lifestyle/ratioBase : 0;
+
+    // streak: consecutive days up to today with no lifestyle spend (not before first tx / createdAt)
+    const lifestyleDates = new Set(transactions.filter(t=>catById[t.categoryId]?.type==="lifestyle").map(t=>t.date));
+    const earliest = transactions.length? transactions.map(t=>t.date).sort()[0] : todayISO();
+    let streak=0; let d=new Date();
+    while(true){ const key=iso(d); if(key<earliest) break; if(lifestyleDates.has(key)) break; streak++; d.setDate(d.getDate()-1); if(streak>90)break; }
+
+    // month trend (lifestyle spend) last 6 months
+    const trend=[];
+    for(let i=5;i>=0;i--){ const dd=new Date(); dd.setMonth(dd.getMonth()-i); const mk=iso(dd).slice(0,7);
+      const tot=transactions.filter(t=>monthOf(t.date)===mk && catById[t.categoryId]?.type==="lifestyle").reduce((s,t)=>s+t.amount,0);
+      trend.push({m:mk, total:tot}); }
+
+    // leak: biggest lifestyle category this month + over-target ones
+    const catSpend = lifestyleCats.map(c=>({cat:c, spent:spentMonthByCat[c.id]||0, target:targetFor(c.id)}))
+      .sort((a,b)=>b.spent-a.spent);
+    const leaks = catSpend.filter(x=>x.target>0 && x.spent>x.target);
+
+    return {catById, m, wStart, wEnd, quests, lifestyleCats,
+      overview:{income,essentials,lifestyle,surplus,lifestyleRatio},
+      streak, trend, catSpend, leaks,
+      weekTotal: lifestyleCats.reduce((s,c)=>s+(spentWeekByCat[c.id]||0),0),
+      weekAllowance: Math.round(lifestyleCats.reduce((s,c)=>s+targetFor(c.id),0)*7/dim),
+      recentTx: [...transactions].sort((a,b)=> b.date<a.date?-1: b.date>a.date?1 : (b.createdAt||0)-(a.createdAt||0)).slice(0,12)
+    };
+  },[state]);
+}
+
+/* ================= UI ================= */
+function App(){
+  const [state,api]=useLedger();
+  const d=useDerived(state);
+  const [tab,setTab]=useState("play");
+  const [logOpen,setLogOpen]=useState(false);
+  const [manageOpen,setManageOpen]=useState(false);
+
+  if(!state||!d) return <div style={{...page,display:"grid",placeItems:"center"}}>
+    <div style={{color:T.muted,fontFamily:"Inter,sans-serif"}}>Loading…</div></div>;
+
+  return (
+    <div style={page}>
+      <div style={{maxWidth:640,margin:"0 auto",padding:"calc(20px + env(safe-area-inset-top)) 15px 110px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+          <div>
+            <div style={eyebrow}>{monthLabel(d.m)}</div>
+            <h1 style={h1}>{tab==="play"?"This week":"Your money"}</h1>
+          </div>
+          <button onClick={()=>setManageOpen(true)} style={gearBtn} aria-label="Manage">⚙︎</button>
+        </div>
+
+        {tab==="play" ? <PlayTab d={d}/> : <StudyTab d={d}/>}
+      </div>
+
+      {/* bottom bar */}
+      <div style={bottomBar}>
+        <div style={{maxWidth:640,margin:"0 auto",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 24px"}}>
+          <button onClick={()=>setTab("play")} style={navBtn(tab==="play")}>Play</button>
+          <button onClick={()=>setLogOpen(true)} style={fab} aria-label="Log a spend">＋</button>
+          <button onClick={()=>setTab("study")} style={navBtn(tab==="study")}>Study</button>
+        </div>
+      </div>
+
+      {logOpen && <LogModal d={d} state={state} api={api} onClose={()=>setLogOpen(false)}/>}
+      {manageOpen && <ManageSheet d={d} state={state} api={api} onClose={()=>setManageOpen(false)}/>}
+    </div>
+  );
+}
+
+function PlayTab({d}){
+  const pct = d.weekAllowance? Math.min(d.weekTotal/d.weekAllowance,1) : 0;
+  const left = d.weekAllowance - d.weekTotal;
+  return (
+    <div>
+      {/* momentum hero */}
+      <div style={hero}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+          <div>
+            <div style={heroLabel}>This week, left to spend</div>
+            <div style={{fontFamily:"Fraunces,serif",fontSize:44,lineHeight:1,color:"#fff",fontWeight:600,marginTop:6}}>
+              {fmt(Math.max(left,0))}</div>
+            <div style={{fontFamily:"Inter,sans-serif",fontSize:12.5,color:"#CFDDD7",marginTop:6}}>
+              of {fmt(d.weekAllowance)} lifestyle pace{left<0?` · ${fmt(-left)} over`:""}</div>
+          </div>
+          <Ring pct={pct} over={left<0}/>
+        </div>
+        <div style={streakPill}>
+          <span style={{fontSize:15}}>🔥</span>
+          {d.streak>0 ? <span><b style={{color:"#fff"}}>{d.streak}</b>-day no-spend streak</span>
+                      : <span>Log a spend to start your streak</span>}
+        </div>
+      </div>
+
+      {/* quests */}
+      <div style={{marginTop:16}}>
+        <div style={sectionTitle}>Weekly quests</div>
+        {d.quests.length===0 && <div style={emptyNote}>No lifestyle categories yet — add some in ⚙︎.</div>}
+        {d.quests.map(q=>(
+          <div key={q.cat.id} style={questCard}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={{fontFamily:"Inter,sans-serif",fontSize:14.5,color:T.ink,display:"flex",gap:8,alignItems:"center"}}>
+                <span style={{fontSize:17}}>{q.cat.emoji}</span>{q.cat.name}</span>
+              <span style={{fontFamily:"Inter,sans-serif",fontVariantNumeric:"tabular-nums",fontSize:13,
+                color:q.over?T.brick:T.muted}}>{fmt(q.week)} / {fmt(q.weekPace)}</span>
+            </div>
+            <div style={{height:9,background:T.bg,borderRadius:6,overflow:"hidden"}}>
+              <div style={{width:(Math.min(q.weekPct,1)*100)+"%",height:"100%",borderRadius:6,
+                background:q.over?T.brick:q.cat.color,transition:"width .4s"}}/>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Ring({pct,over}){
+  const R=26, C=2*Math.PI*R, off=C*(1-pct);
+  return <svg width="70" height="70" viewBox="0 0 70 70">
+    <circle cx="35" cy="35" r={R} fill="none" stroke="rgba(255,255,255,.18)" strokeWidth="7"/>
+    <circle cx="35" cy="35" r={R} fill="none" stroke={over?T.brass:"#EFE2C6"} strokeWidth="7"
+      strokeLinecap="round" strokeDasharray={C} strokeDashoffset={off}
+      transform="rotate(-90 35 35)" style={{transition:"stroke-dashoffset .5s"}}/>
+    <text x="35" y="40" textAnchor="middle" fontFamily="Inter,sans-serif" fontSize="14" fontWeight="600" fill="#fff">
+      {Math.round(pct*100)}%</text>
+  </svg>;
+}
+
+function StudyTab({d}){
+  const o=d.overview;
+  const maxTrend=Math.max(...d.trend.map(t=>t.total),1);
+  const maxCat=Math.max(...d.catSpend.map(c=>c.spent),1);
+  return (
+    <div>
+      {/* overview */}
+      <div style={{...card,padding:"16px 16px 8px"}}>
+        <div style={sectionTitle2}>The month at a glance</div>
+        <OverviewRow label="Income" value={o.income} tone={T.pine}/>
+        <OverviewRow label="Essentials" value={-o.essentials} tone={T.ink}/>
+        <OverviewRow label="Lifestyle" value={-o.lifestyle} tone={T.ink}/>
+        <div style={{height:1,background:T.line,margin:"6px 0"}}/>
+        <OverviewRow label="Left over" value={o.surplus} tone={o.surplus>=0?T.good:T.brick} bold/>
+      </div>
+
+      {/* ratio */}
+      <div style={{...card,padding:16,marginTop:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+          <span style={sectionTitle2}>Lifestyle vs essential</span>
+          <span style={{fontFamily:"Inter,sans-serif",fontSize:13,fontWeight:600,color:T.brass}}>
+            {Math.round(o.lifestyleRatio*100)}% lifestyle</span>
+        </div>
+        <div style={{display:"flex",height:14,borderRadius:8,overflow:"hidden",background:T.bg}}>
+          <div style={{width:(o.lifestyleRatio*100)+"%",background:T.brass}}/>
+          <div style={{flex:1,background:T.sage}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",marginTop:6,fontFamily:"Inter,sans-serif",fontSize:11,color:T.muted}}>
+          <span>Lifestyle {fmt(o.lifestyle)}</span><span>Essentials {fmt(o.essentials)}</span>
+        </div>
+      </div>
+
+      {/* leaks */}
+      {(d.catSpend[0]?.spent>0) && (
+        <div style={{...card,padding:16,marginTop:12}}>
+          <div style={sectionTitle2}>Where it's going</div>
+          <div style={{fontFamily:"Inter,sans-serif",fontSize:13,color:T.ink,marginTop:6}}>
+            Biggest this month: <b>{d.catSpend[0].cat.emoji} {d.catSpend[0].cat.name}</b> at {fmt(d.catSpend[0].spent)}.
+            {d.leaks.length>0 && <span style={{color:T.brick}}> {d.leaks.length} categor{d.leaks.length>1?"ies":"y"} over target.</span>}
+          </div>
+        </div>
+      )}
+
+      {/* category breakdown */}
+      <div style={{...card,padding:16,marginTop:12}}>
+        <div style={sectionTitle2}>Lifestyle by category</div>
+        <div style={{marginTop:10}}>
+          {d.catSpend.map(c=>(
+            <div key={c.cat.id} style={{marginBottom:11}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                <span style={{fontFamily:"Inter,sans-serif",fontSize:13,color:T.ink}}>{c.cat.emoji} {c.cat.name}</span>
+                <span style={{fontFamily:"Inter,sans-serif",fontVariantNumeric:"tabular-nums",fontSize:12.5,
+                  color:c.target&&c.spent>c.target?T.brick:T.muted}}>
+                  {fmt(c.spent)}{c.target?` / ${fmt(c.target)}`:""}</span>
+              </div>
+              <div style={{height:8,background:T.bg,borderRadius:5,overflow:"hidden"}}>
+                <div style={{width:(c.spent/maxCat*100)+"%",height:"100%",background:c.cat.color,borderRadius:5}}/>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* trend */}
+      <div style={{...card,padding:16,marginTop:12}}>
+        <div style={sectionTitle2}>Lifestyle spend, last 6 months</div>
+        <div style={{display:"flex",alignItems:"flex-end",gap:8,height:110,marginTop:12}}>
+          {d.trend.map((t,i)=>{
+            const h=14+(t.total/maxTrend)*80;
+            const isNow=t.m===d.m;
+            return <div key={t.m} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center"}}>
+              <div style={{fontFamily:"Inter,sans-serif",fontSize:9.5,color:T.muted,marginBottom:3,fontVariantNumeric:"tabular-nums"}}>
+                {t.total?Math.round(t.total/100):""}</div>
+              <div style={{width:"78%",height:h,background:isNow?T.pine:T.sage,borderRadius:5,transition:"height .4s"}}/>
+              <div style={{fontFamily:"Inter,sans-serif",fontSize:9.5,color:T.muted,marginTop:5}}>{monthLabel(t.m).slice(0,3)}</div>
+            </div>;
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+function OverviewRow({label,value,tone,bold}){
+  return <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0"}}>
+    <span style={{fontFamily:"Inter,sans-serif",fontSize:bold?15:14,color:T.ink,fontWeight:bold?600:400}}>{label}</span>
+    <span style={{fontFamily:"Inter,sans-serif",fontVariantNumeric:"tabular-nums",fontSize:bold?18:15,
+      fontWeight:600,color:tone}}>{value<0?"−":""}{fmt(Math.abs(value))}</span>
+  </div>;
+}
+
+/* ---------- Log modal ---------- */
+function LogModal({d,state,api,onClose}){
+  const cats=state.categories.filter(c=>!c.archived && c.type!=="income").sort((a,b)=>(a.type>b.type?1:-1)||a.sortOrder-b.sortOrder);
+  const [amount,setAmount]=useState("");
+  const [categoryId,setCategoryId]=useState(d.lifestyleCats[0]?.id || cats[0]?.id);
+  const [date,setDate]=useState(todayISO());
+  const [account,setAccount]=useState("revolut");
+  const [note,setNote]=useState("");
+  const [err,setErr]=useState("");
+
+  const save=async()=>{
+    const cents=toCents(amount);
+    if(cents===null||cents<=0){ setErr("Enter an amount"); return; }
+    if(!categoryId){ setErr("Pick a category"); return; }
+    await api.addTx({amount:cents,categoryId,date,account,note:note.trim()||undefined});
+    onClose();
+  };
+  return <Sheet onClose={onClose} title="Log a spend">
+    <div style={{display:"flex",alignItems:"center",gap:6,margin:"4px 0 14px"}}>
+      <span style={{fontFamily:"Fraunces,serif",fontSize:34,color:T.muted}}>€</span>
+      <input autoFocus value={amount} inputMode="decimal" placeholder="0"
+        onChange={e=>{setAmount(e.target.value);setErr("");}}
+        onKeyDown={e=>{if(e.key==="Enter")save();}}
+        style={{border:"none",background:"transparent",fontFamily:"Fraunces,serif",fontSize:40,fontWeight:600,
+          color:T.pineDeep,outline:"none",width:"100%",borderBottom:`2px solid ${T.line}`}}/>
+    </div>
+    <div style={fieldLabel}>Category</div>
+    <div style={{display:"flex",flexWrap:"wrap",gap:7,marginBottom:14}}>
+      {cats.map(c=>(
+        <button key={c.id} onClick={()=>setCategoryId(c.id)}
+          style={chip(categoryId===c.id,c.color)}>{c.emoji} {c.name}</button>
+      ))}
+    </div>
+    <div style={{display:"flex",gap:10,marginBottom:14}}>
+      <div style={{flex:1}}>
+        <div style={fieldLabel}>Date</div>
+        <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={inputBox}/>
+      </div>
+      <div style={{flex:1}}>
+        <div style={fieldLabel}>Account</div>
+        <select value={account} onChange={e=>setAccount(e.target.value)} style={inputBox}>
+          <option value="revolut">Revolut</option><option value="ptsb">PTSB</option><option value="cash">Cash</option>
+        </select>
+      </div>
+    </div>
+    <div style={fieldLabel}>Note (optional)</div>
+    <input value={note} onChange={e=>setNote(e.target.value)} placeholder="e.g. Dunnes" style={{...inputBox,marginBottom:14}}/>
+    {err && <div style={{color:T.brick,fontFamily:"Inter,sans-serif",fontSize:13,marginBottom:10}}>{err}</div>}
+    <button onClick={save} style={primaryBtn}>Add spend</button>
+  </Sheet>;
+}
+
+/* ---------- Manage sheet ---------- */
+function ManageSheet({d,state,api,onClose}){
+  const [view,setView]=useState("menu");
+  const fileRef=React.useRef();
+
+  const doExport=async()=>{
+    const data=await api.exportJSON();
+    const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+    const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+    a.download=`money-backup-${todayISO()}.json`; a.click(); URL.revokeObjectURL(a.href);
+  };
+  const doImport=(e)=>{
+    const f=e.target.files?.[0]; if(!f) return;
+    const rd=new FileReader();
+    rd.onload=async()=>{ try{ const obj=JSON.parse(rd.result);
+      if(confirm("Import will REPLACE everything currently in the app. Continue?")){ await api.importJSON(obj); alert("Imported."); onClose(); }
+    }catch(err){ alert("Import failed: "+err.message); } };
+    rd.readAsText(f);
+  };
+
+  return <Sheet onClose={onClose} title={view==="menu"?"Manage":view[0].toUpperCase()+view.slice(1)}>
+    {view!=="menu" && <button onClick={()=>setView("menu")} style={backBtn}>‹ Back</button>}
+
+    {view==="menu" && <div style={{display:"grid",gap:9}}>
+      <MenuRow icon="🎯" label="Targets (monthly budgets)" onClick={()=>setView("targets")}/>
+      <MenuRow icon="🔁" label="Recurring income & bills" onClick={()=>setView("recurring")}/>
+      <MenuRow icon="🏷️" label="Categories" onClick={()=>setView("categories")}/>
+      <div style={{height:1,background:T.line,margin:"6px 0"}}/>
+      <MenuRow icon="⬇️" label="Export backup (JSON)" onClick={doExport}/>
+      <MenuRow icon="⬆️" label="Import backup (replaces all)" onClick={()=>fileRef.current.click()}/>
+      <input ref={fileRef} type="file" accept="application/json,.json" onChange={doImport} style={{display:"none"}}/>
+      <div style={{height:1,background:T.line,margin:"6px 0"}}/>
+      <MenuRow icon="↺" label="Reset to seed data" danger onClick={()=>{ if(confirm("Wipe everything and reload the starter data?")) api.resetAll().then(onClose); }}/>
+      <div style={{fontFamily:"Inter,sans-serif",fontSize:11.5,color:T.muted,marginTop:6,lineHeight:1.5}}>
+        Everything is stored only on this device. Export regularly to back up or move to another phone.
+      </div>
+    </div>}
+
+    {view==="targets" && <TargetsEditor d={d} state={state} api={api}/>}
+    {view==="recurring" && <RecurringEditor state={state} api={api}/>}
+    {view==="categories" && <CategoriesEditor state={state} api={api}/>}
+  </Sheet>;
+}
+function MenuRow({icon,label,onClick,danger}){
+  return <button onClick={onClick} style={{display:"flex",alignItems:"center",gap:11,width:"100%",textAlign:"left",
+    background:T.card,border:`1px solid ${T.line}`,borderRadius:12,padding:"13px 14px",cursor:"pointer",
+    fontFamily:"Inter,sans-serif",fontSize:14.5,color:danger?T.brick:T.ink}}>
+    <span style={{fontSize:18}}>{icon}</span>{label}</button>;
+}
+function TargetsEditor({d,state,api}){
+  const cats=state.categories.filter(c=>c.type==="lifestyle"&&!c.archived);
+  const m=thisMonth();
+  const cur=(id)=>state.targets.find(t=>t.categoryId===id&&t.month===m)?.amount||0;
+  return <div>
+    <div style={{fontFamily:"Inter,sans-serif",fontSize:12.5,color:T.muted,marginBottom:12}}>
+      Monthly budget for {monthLabel(m)}. Weekly quests derive from these automatically.</div>
+    {cats.map(c=>(
+      <div key={c.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"9px 0",borderTop:`1px solid ${T.bg}`}}>
+        <span style={{fontFamily:"Inter,sans-serif",fontSize:14,color:T.ink}}>{c.emoji} {c.name}</span>
+        <span style={{display:"flex",alignItems:"center",gap:3}}>
+          <span style={{color:T.muted}}>€</span>
+          <input defaultValue={(cur(c.id)/100)||""} inputMode="decimal"
+            onBlur={e=>{const cents=toCents(e.target.value)||0; api.setTarget(c.id,m,cents);}}
+            style={{width:70,textAlign:"right",border:"none",borderBottom:`1.5px solid ${T.line}`,background:"transparent",
+              fontFamily:"Inter,sans-serif",fontVariantNumeric:"tabular-nums",fontSize:15,fontWeight:600,color:T.pineDeep,outline:"none"}}/>
+        </span>
+      </div>
+    ))}
+  </div>;
+}
+function RecurringEditor({state,api}){
+  const catById=Object.fromEntries(state.categories.map(c=>[c.id,c]));
+  const rows=[...state.recurring].sort((a,b)=>{
+    const ta=catById[a.categoryId]?.type, tb=catById[b.categoryId]?.type;
+    if(ta!==tb) return ta==="income"?-1:1; return b.amount-a.amount; });
+  const [editing,setEditing]=useState(null);
+  const blank={name:"",categoryId:state.categories.find(c=>c.type==="essential")?.id,amount:0,dayOfMonth:1,active:1,startMonth:null,endMonth:null};
+  return <div>
+    {rows.map(r=>(
+      <div key={r.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 0",borderTop:`1px solid ${T.bg}`}}>
+        <span style={{fontFamily:"Inter,sans-serif",fontSize:13.5,color:r.active?T.ink:T.muted}}>
+          {catById[r.categoryId]?.emoji} {r.name}{r.endMonth?<span style={{color:T.brass,fontSize:11}}> · ends {r.endMonth}</span>:""}</span>
+        <span style={{display:"flex",alignItems:"center",gap:10}}>
+          <b style={{fontFamily:"Inter,sans-serif",fontVariantNumeric:"tabular-nums",fontSize:13.5,
+            color:catById[r.categoryId]?.type==="income"?T.pine:T.ink}}>{fmt(r.amount)}</b>
+          <button onClick={()=>setEditing(r)} style={miniLink}>edit</button>
+        </span>
+      </div>
+    ))}
+    <button onClick={()=>setEditing(blank)} style={{...primaryBtn,marginTop:14}}>+ Add recurring item</button>
+    {editing && <RecurringForm rec={editing} cats={state.categories} onSave={async(r)=>{await api.saveRecurring(r);setEditing(null);}}
+      onDelete={editing.id?async()=>{if(confirm("Delete this item?")){await api.deleteRecurring(editing.id);setEditing(null);}}:null}
+      onCancel={()=>setEditing(null)}/>}
+  </div>;
+}
+function RecurringForm({rec,cats,onSave,onDelete,onCancel}){
+  const [f,setF]=useState({...rec, amountStr:rec.amount?String(rec.amount/100):""});
+  const set=(k,v)=>setF(s=>({...s,[k]:v}));
+  const usable=cats.filter(c=>c.type!=="lifestyle"||true);
+  return <Sheet onClose={onCancel} title={rec.id?"Edit item":"New item"}>
+    <div style={fieldLabel}>Name</div>
+    <input value={f.name} onChange={e=>set("name",e.target.value)} style={{...inputBox,marginBottom:12}} placeholder="e.g. Netflix"/>
+    <div style={fieldLabel}>Category</div>
+    <select value={f.categoryId} onChange={e=>set("categoryId",e.target.value)} style={{...inputBox,marginBottom:12}}>
+      {usable.map(c=><option key={c.id} value={c.id}>{c.emoji} {c.name} ({c.type})</option>)}
+    </select>
+    <div style={{display:"flex",gap:10,marginBottom:12}}>
+      <div style={{flex:1}}><div style={fieldLabel}>Amount</div>
+        <input value={f.amountStr} inputMode="decimal" onChange={e=>set("amountStr",e.target.value)} style={inputBox} placeholder="0"/></div>
+      <div style={{flex:1}}><div style={fieldLabel}>Day of month</div>
+        <input value={f.dayOfMonth} inputMode="numeric" onChange={e=>set("dayOfMonth",parseInt(e.target.value)||1)} style={inputBox}/></div>
+    </div>
+    <div style={{display:"flex",gap:10,marginBottom:12}}>
+      <div style={{flex:1}}><div style={fieldLabel}>Ends (YYYY-MM, optional)</div>
+        <input value={f.endMonth||""} onChange={e=>set("endMonth",e.target.value||null)} placeholder="2027-02" style={inputBox}/></div>
+      <div style={{flex:1}}><div style={fieldLabel}>Active</div>
+        <select value={f.active?1:0} onChange={e=>set("active",parseInt(e.target.value))} style={inputBox}>
+          <option value={1}>Yes</option><option value={0}>Paused</option></select></div>
+    </div>
+    <button onClick={()=>{const amount=toCents(f.amountStr)||0;
+      onSave({id:f.id,name:f.name.trim()||"Untitled",categoryId:f.categoryId,amount,dayOfMonth:f.dayOfMonth||1,
+        active:f.active?1:0,startMonth:f.startMonth||null,endMonth:f.endMonth||null});}} style={primaryBtn}>Save</button>
+    {onDelete && <button onClick={onDelete} style={{...ghostBtn,color:T.brick,marginTop:8}}>Delete</button>}
+  </Sheet>;
+}
+function CategoriesEditor({state,api}){
+  const [editing,setEditing]=useState(null);
+  const rows=[...state.categories].sort((a,b)=>a.sortOrder-b.sortOrder);
+  const blank={name:"",emoji:"✨",color:"#6E7A72",type:"lifestyle",archived:0,sortOrder:50,_exists:false};
+  return <div>
+    {rows.map(c=>(
+      <div key={c.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"9px 0",borderTop:`1px solid ${T.bg}`}}>
+        <span style={{fontFamily:"Inter,sans-serif",fontSize:14,color:c.archived?T.muted:T.ink}}>
+          {c.emoji} {c.name} <span style={{fontSize:11,color:T.muted}}>· {c.type}{c.archived?" · archived":""}</span></span>
+        <button onClick={()=>setEditing({...c,_exists:true})} style={miniLink}>edit</button>
+      </div>
+    ))}
+    <button onClick={()=>setEditing(blank)} style={{...primaryBtn,marginTop:14}}>+ Add category</button>
+    {editing && <Sheet onClose={()=>setEditing(null)} title={editing._exists?"Edit category":"New category"}>
+      <div style={{display:"flex",gap:10,marginBottom:12}}>
+        <div style={{width:64}}><div style={fieldLabel}>Icon</div>
+          <input value={editing.emoji} onChange={e=>setEditing({...editing,emoji:e.target.value})} style={{...inputBox,textAlign:"center"}}/></div>
+        <div style={{flex:1}}><div style={fieldLabel}>Name</div>
+          <input value={editing.name} onChange={e=>setEditing({...editing,name:e.target.value})} style={inputBox}/></div>
+      </div>
+      <div style={{display:"flex",gap:10,marginBottom:12}}>
+        <div style={{flex:1}}><div style={fieldLabel}>Type</div>
+          <select value={editing.type} onChange={e=>setEditing({...editing,type:e.target.value})} style={inputBox}>
+            <option value="lifestyle">lifestyle</option><option value="essential">essential</option><option value="income">income</option></select></div>
+        <div style={{flex:1}}><div style={fieldLabel}>Colour</div>
+          <input type="color" value={editing.color} onChange={e=>setEditing({...editing,color:e.target.value})}
+            style={{...inputBox,padding:2,height:42}}/></div>
+      </div>
+      <div style={fieldLabel}>Archived</div>
+      <select value={editing.archived?1:0} onChange={e=>setEditing({...editing,archived:parseInt(e.target.value)})} style={{...inputBox,marginBottom:14}}>
+        <option value={0}>No</option><option value={1}>Yes</option></select>
+      <button onClick={async()=>{ await api.saveCategory({id:editing.id,name:editing.name.trim()||"Untitled",emoji:editing.emoji||"✨",
+        color:editing.color,type:editing.type,archived:editing.archived?1:0,sortOrder:editing.sortOrder??50,_exists:editing._exists}); setEditing(null); }}
+        style={primaryBtn}>Save</button>
+    </Sheet>}
+  </div>;
+}
+
+/* ---------- generic bottom sheet ---------- */
+function Sheet({title,children,onClose}){
+  return <div style={overlay} onClick={onClose}>
+    <div style={sheet} onClick={e=>e.stopPropagation()}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <span style={{fontFamily:"Fraunces,serif",fontSize:20,fontWeight:600,color:T.ink}}>{title}</span>
+        <button onClick={onClose} style={closeBtn}>×</button>
+      </div>
+      {children}
+    </div>
+  </div>;
+}
+
+/* ---------------- styles ---------------- */
+const page={minHeight:"100vh",background:T.bg,width:"100%"};
+const eyebrow={fontFamily:"Inter,sans-serif",fontSize:11,letterSpacing:".12em",textTransform:"uppercase",color:T.pine,fontWeight:600};
+const h1={fontFamily:"Fraunces,serif",fontSize:25,fontWeight:600,color:T.ink,margin:"2px 0 0"};
+const gearBtn={border:`1px solid ${T.line}`,background:T.card,borderRadius:11,width:40,height:40,fontSize:18,color:T.ink,cursor:"pointer"};
+const hero={background:`linear-gradient(150deg,${T.pine},${T.pineDeep})`,borderRadius:22,padding:"18px 20px 16px",
+  boxShadow:"0 10px 28px rgba(30,66,56,.18)",marginTop:8};
+const heroLabel={fontFamily:"Inter,sans-serif",fontSize:11.5,letterSpacing:".06em",textTransform:"uppercase",color:T.brassSoft,opacity:.9};
+const streakPill={display:"inline-flex",alignItems:"center",gap:7,marginTop:14,background:"rgba(255,255,255,.10)",
+  border:"1px solid rgba(255,255,255,.16)",borderRadius:999,padding:"6px 12px",fontFamily:"Inter,sans-serif",fontSize:12.5,color:"#E7EFEB"};
+const sectionTitle={fontFamily:"Inter,sans-serif",fontSize:12,letterSpacing:".08em",textTransform:"uppercase",color:T.muted,fontWeight:600,margin:"4px 2px 10px"};
+const sectionTitle2={fontFamily:"Fraunces,serif",fontSize:16,fontWeight:600,color:T.ink};
+const card={background:T.card,border:`1px solid ${T.line}`,borderRadius:16};
+const questCard={background:T.card,border:`1px solid ${T.line}`,borderRadius:14,padding:"12px 14px",marginBottom:9};
+const emptyNote={fontFamily:"Inter,sans-serif",fontSize:13,color:T.muted,padding:"8px 2px"};
+const bottomBar={position:"fixed",left:0,right:0,bottom:0,paddingBottom:"env(safe-area-inset-bottom)",
+  background:"rgba(231,228,218,.92)",backdropFilter:"blur(8px)",borderTop:`1px solid ${T.line}`,height:66,display:"flex",alignItems:"center"};
+const navBtn=(on)=>({border:"none",background:"transparent",fontFamily:"Inter,sans-serif",fontSize:14,fontWeight:600,
+  color:on?T.pine:T.muted,cursor:"pointer",padding:"10px 20px",width:110});
+const fab={border:"none",background:T.pine,color:"#fff",width:56,height:56,borderRadius:28,fontSize:26,cursor:"pointer",
+  boxShadow:"0 6px 16px rgba(44,93,80,.4)",marginTop:-26,lineHeight:1};
+const overlay={position:"fixed",inset:0,background:"rgba(30,40,36,.42)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:50};
+const sheet={background:T.bg,width:"100%",maxWidth:640,maxHeight:"88vh",overflowY:"auto",borderRadius:"22px 22px 0 0",
+  padding:"18px 16px calc(24px + env(safe-area-inset-bottom))"};
+const closeBtn={border:"none",background:"transparent",fontSize:26,color:T.muted,cursor:"pointer",lineHeight:1};
+const backBtn={border:"none",background:"transparent",color:T.pine,fontFamily:"Inter,sans-serif",fontSize:14,cursor:"pointer",padding:"0 0 10px"};
+const fieldLabel={fontFamily:"Inter,sans-serif",fontSize:11.5,letterSpacing:".05em",textTransform:"uppercase",color:T.muted,marginBottom:5,fontWeight:600};
+const inputBox={width:"100%",border:`1px solid ${T.line}`,background:"#fff",borderRadius:10,padding:"10px 11px",
+  fontFamily:"Inter,sans-serif",fontSize:14.5,color:T.ink,outline:"none"};
+const chip=(on,color)=>({border:`1.5px solid ${on?(color||T.pine):T.line}`,background:on?(color||T.pine):"#fff",color:on?"#fff":T.ink,
+  borderRadius:999,padding:"7px 12px",fontFamily:"Inter,sans-serif",fontSize:13,cursor:"pointer"});
+const primaryBtn={width:"100%",border:"none",background:T.pine,color:"#fff",borderRadius:12,padding:"13px",
+  fontFamily:"Inter,sans-serif",fontSize:15,fontWeight:600,cursor:"pointer"};
+const ghostBtn={width:"100%",border:`1px solid ${T.line}`,background:"transparent",borderRadius:12,padding:"11px",
+  fontFamily:"Inter,sans-serif",fontSize:14,cursor:"pointer"};
+const miniLink={border:"none",background:"transparent",color:T.pine,fontFamily:"Inter,sans-serif",fontSize:13,cursor:"pointer"};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(()=>{}));
+  }
+</script>
+</body>
+</html>
